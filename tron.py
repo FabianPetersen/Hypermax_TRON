@@ -83,7 +83,6 @@ class Game:
         for n_x, n_y in neighbors:
             self.game_board[n_x, n_y].remove((x, y))
 
-
     def get_fast_neighbors(self, x, y, should_filter=False):
         return self.game_board[(x, y)] if not should_filter else list(filter(lambda move: self.current_state[move[0], move[1]] == '.', self.game_board[(x, y)]))
 
@@ -96,6 +95,53 @@ class Game:
         :return:
         """
         return len(self.get_neighbors(x, y)) == 0
+
+    def wall_follower(self, heads=[(0, 0)], current_head_index=0, depth=5):
+        move_scores = {}
+        head = heads[current_head_index]
+
+        # We have reached max-depth, calculate the final position
+        if depth == 0:
+            # Get next player move
+            costs = self.dijkstra(head)
+            maxcost = 1000000
+            edges = 0
+
+            # Count the edges
+            for x in range(0, self.width):
+                for y in range(0, self.height):
+                    point_costs = costs[0][x, y]
+
+                    if point_costs <= maxcost:
+                        edges += len(self.get_fast_neighbors(x, y, True))
+
+            return edges, head
+
+        single_move = len(self.get_fast_neighbors(head[0], head[1], True)) == 1
+        for move in self.get_fast_neighbors(head[0], head[1]):
+            # Check if the move is valid
+            if self.current_state[move[0], move[1]] != '.':
+                continue
+
+            # Make the move
+            self.current_state[move[0], move[1]] = Game.get_char(current_head_index)
+
+            # Check a deeper move
+            new_depth = depth - 1 if not single_move else depth
+            move_scores[move], _ = self.wall_follower([move for x in range(len(heads))], current_head_index, depth=new_depth)
+
+            # Setting back the field to empty
+            self.current_state[move[0], move[1]] = '.'
+
+        # Get the best move
+        best_move = heads[current_head_index]
+        best_score = -1000000000000
+        for move, score in move_scores.items():
+            if score > best_score:
+                best_move = move
+                best_score = score
+
+        return best_score, best_move
 
     def hypermax(self, heads=[(0, 0)], current_head_index=0, alpha=[-999999], depth=3):
         """
@@ -116,9 +162,10 @@ class Game:
             return Game.get_hypermax_return(m), (0, 0)
 
         elif depth == 0:
-            return Game.get_hypermax_return(self.voronoi_heuristic_hypermax(heads)), (0, 0)
+            return Game.get_hypermax_return(self.voronoi_heuristic_hypermax(heads, current_head_index)), (0, 0)
 
         first_child = True
+        single_move = len(self.get_fast_neighbors(head[0], head[1], True)) == 1
         for move in self.get_fast_neighbors(head[0], head[1]):
             # Check if the move is valid
             if self.current_state[move[0], move[1]] != '.':
@@ -132,7 +179,8 @@ class Game:
             new_heads[current_head_index] = move
 
             # Get next player move
-            m, _ = self.hypermax(new_heads, (current_head_index + 1) % len(heads), alpha[:], depth - 1)
+            new_depth = depth - 1 if not single_move else depth
+            m, _ = self.hypermax(new_heads, (current_head_index + 1) % len(heads), alpha[:], depth=new_depth)
 
             # Setting back the field to empty
             self.current_state[move[0], move[1]] = '.'
@@ -177,9 +225,10 @@ class Game:
 
         return dists, visited_ap
 
-    def voronoi_heuristic_hypermax(self, heads):
+    def voronoi_heuristic_hypermax(self, heads, color_drawer=None):
         count = [0 for x in range(len(heads))]
         edges = [0 for x in range(len(heads))]
+        battleground = 0
         maxcost = 1000000
 
         # with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -202,7 +251,22 @@ class Game:
                     count[min_index] += 1
                     edges[min_index] += len(self.get_fast_neighbors(x, y, True))
 
-        return [(K1 * count[i] + K2 * edges[i]) / maxcost for i in range(len(heads))]
+                    # Draw the players voronoi region
+                    if color_drawer and (x, y) != heads[min_index]:
+                        color_drawer(x, y, self.get_char(min_index))
+
+                # Draw battleground
+                elif min_value <= maxcost and point_costs.count(min_value) > 1:
+                    battleground += 1
+                    if color_drawer:
+                        color_drawer(x, y, "B")
+
+                # Draw articulation points
+                if color_drawer and self.articulation_points[x, y] > 0:
+                    color_drawer(x, y, "A")
+
+        return [(count[i] + edges[i] * 0.33 * 0.005 - battleground * 0.05) / maxcost for i in range(len(heads))]
+        # return [(K1 * count[i] + K2 * edges[i]) / maxcost for i in range(len(heads))]
 
     def _find_articulation_points_util(self, u, visited, ap, parent, low, disc, depth=0):
         # Count of children in current node
@@ -305,6 +369,24 @@ class Game:
             for y in range(0, self.height):
                 if char == self.current_state[x, y]:
                     self.current_state[x, y] = '.'
+
+    def get_ai_move(self, heads, current_player_index, depth):
+        reachable_positions = self.dijkstra(heads[current_player_index])
+        maxcost = 1000000
+
+        seperated = True
+        for i in range(len(heads)):
+            if reachable_positions[0][heads[i][0], heads[i][1]] < maxcost:
+                seperated = False
+                break
+
+        if seperated:
+            m, (qx, qy) = self.wall_follower(heads, 1, depth=4)
+
+        else:
+            m, (qx, qy) = self.hypermax(heads, 1, [-999999 for x in range(len(heads))], depth=3)
+
+        return m, (qx, qy)
 
     def play(self):
         # Set positions
@@ -421,6 +503,16 @@ class Game:
     @staticmethod
     def get_char(index=0):
         return ['X', 'O', 'E', 'W'][index]
+
+    @staticmethod
+    def get_char_color(char, alpha=1):
+        if char == 'X':
+            return (0, 255, 0, alpha),
+
+        elif char == 'O':
+            return (255, 0, 0, alpha),
+
+        return (255, 255, 0, alpha),
 
     @staticmethod
     def get_hypermax_return(values):
